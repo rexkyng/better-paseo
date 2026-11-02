@@ -181,8 +181,9 @@ type HighlightCall = (input: {
  * answer arrives, and it has no theme data of its own — Shiki lives on the
  * daemon. So each answer carries those six, and they outlive the block that
  * fetched them: one round trip per theme switch, none per block after that.
- * Nothing asks for the palette by itself: every normal answer carries it, so the
- * first completed block of a session is what teaches the rest.
+ * Nothing asks for the palette by itself: every normal answer carries it. The
+ * client also knows these colours ahead of time (`THEME_SYNTAX_ROLES`), so what
+ * arrives here only confirms or corrects them.
  */
 const ROLE_KEYS = ["keyword", "string", "number", "comment", "property", "function"] as const;
 const roleCache = new Map<string, SyntaxRoles>();

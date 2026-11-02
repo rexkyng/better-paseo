@@ -51,6 +51,9 @@ const NORD: SyntaxRoles = {
   function: "#88c0d0",
 };
 
+/** A palette as the daemon reports one, with two colours no table contains. */
+const REPORTED: SyntaxRoles = { ...NORD, keyword: "#123456", property: "#654321" };
+
 /** Every colour the block painted, whatever role carried it. */
 function paintedColours(renderer: ReactTestRenderer): string[] {
   const found: string[] = [];
@@ -84,32 +87,43 @@ afterEach(() => {
 });
 
 describe("a streaming fence follows the reader's syntax theme", () => {
-  it("draws with the palette the tokens were built from", async () => {
+  it("colours the first fence from the setting, with nothing answered yet", async () => {
     const plain = await draw();
-    expect(paintedColours(plain)).toContain("#f47067");
+    expect(paintedColours(plain)).toContain("#c678dd");
     act(() => plain.unmount());
 
-    const themed = await draw({ syntaxTheme: "nord", syntaxRoles: NORD });
-    const colours = paintedColours(themed);
-    expect(colours).toContain(NORD.keyword.toLowerCase());
-    expect(colours).not.toContain("#f47067");
-    act(() => themed.unmount());
+    const tokyo = await draw({ syntaxTheme: "tokyo-night" });
+    const colours = paintedColours(tokyo);
+    expect(colours).toContain("#9d7cd8");
+    expect(colours).not.toContain("#c678dd");
+    act(() => tokyo.unmount());
+  });
+
+  it("prefers what the daemon reported over the palette copied into the client", async () => {
+    const copy = await draw({ syntaxTheme: "gruvbox" });
+    expect(paintedColours(copy)).toContain("#fe8019");
+    act(() => copy.unmount());
+
+    const reported = await draw({ syntaxTheme: "gruvbox", syntaxRoles: REPORTED });
+    const colours = paintedColours(reported);
+    expect(colours).toContain("#123456");
+    expect(colours).not.toContain("#fe8019");
+    act(() => reported.unmount());
   });
 
   it("learns the palette from a finished block and keeps it", async () => {
     rpc.call.mockImplementation(async () => ({
-      lines: [], language: null, theme: "nord" as const, roles: NORD,
+      lines: [], language: null, theme: "gruvbox" as const, roles: REPORTED,
     }));
 
-    // A streaming fence has no answer to learn from yet, so the theme tokens it
-    // draws with carry no palette.
-    expect(readSyntaxRoles("nord", true)).toBeNull();
+    // Nothing has been answered this session, so the store is still empty.
+    expect(readSyntaxRoles("gruvbox", true)).toBeNull();
 
     // A closed fence asks for tokens, and its answer carries the six colours.
-    const finished = await draw({ syntaxTheme: "nord" }, true);
+    const finished = await draw({ syntaxTheme: "gruvbox" }, true);
     act(() => finished.unmount());
 
-    expect(readSyntaxRoles("nord", true)).toEqual(NORD);
+    expect(readSyntaxRoles("gruvbox", true)).toMatchObject({ keyword: "#123456" });
     // One ask for tokens, and no extra round trip hunting for the palette alone.
     expect(rpc.call.mock.calls.every(([request]) => (request as { code?: string }).code !== "")).toBe(true);
   });

@@ -319,9 +319,8 @@ export interface ThemeTokenOptions {
 }
 
 /**
- * GitHub Dark Dimmed / GitHub Light, as far as the six roles go: what the local
- * tokeniser draws before the daemon has named a palette, and what every caller
- * outside a renderer (the settings previews) keeps.
+ * GitHub Dark Dimmed / GitHub Light, as far as the six roles go: the last resort
+ * for an id this table does not know.
  */
 const FALLBACK_SYNTAX_ROLES = {
   dark: {
@@ -342,6 +341,55 @@ const FALLBACK_SYNTAX_ROLES = {
   },
 } as const satisfies Record<"dark" | "light", SyntaxRoles>;
 
+/**
+ * The six roles per Paseo syntax theme, copied from what the daemon probes.
+ *
+ * Without this, colouring a block before its answer arrived meant waiting for
+ * some other block to finish first, and the wait showed as a flash of GitHub
+ * colours on the fences of a fresh session. A theme switch needs no round trip
+ * this way, and the daemon's report still wins if it disagrees, so a newer Shiki
+ * can quietly correct a value here.
+ *
+ * The light column follows the daemon's mapping: Shiki ships no light flavour for
+ * Tokyo Night, Nord or Dracula, so those reuse GitHub Light. `test/unit/
+ * syntax-theme-server.test.ts` pins these same values as its goldens, which is
+ * where to look if a colour ever disagrees with what the daemon answers.
+ */
+const THEME_SYNTAX_ROLES: Partial<Record<PaseoSyntaxThemeId, Record<"dark" | "light", SyntaxRoles>>> = {
+  github: {
+    dark: { keyword: "#ff7b72", string: "#a5d6ff", number: "#79c0ff", comment: "#8b949e", property: "#79c0ff", function: "#d2a8ff" },
+    light: FALLBACK_SYNTAX_ROLES.light,
+  },
+  one: {
+    dark: { keyword: "#c678dd", string: "#98c379", number: "#d19a66", comment: "#7f848e", property: "#e06c75", function: "#61afef" },
+    light: { keyword: "#a626a4", string: "#50a14f", number: "#986801", comment: "#a0a1a7", property: "#986801", function: "#4078f2" },
+  },
+  catppuccin: {
+    dark: { keyword: "#cba6f7", string: "#a6e3a1", number: "#fab387", comment: "#9399b2", property: "#fab387", function: "#89b4fa" },
+    light: { keyword: "#8839ef", string: "#40a02b", number: "#fe640b", comment: "#7c7f93", property: "#fe640b", function: "#1e66f5" },
+  },
+  gruvbox: {
+    dark: { keyword: "#fe8019", string: "#b8bb26", number: "#d3869b", comment: "#928374", property: "#83a598", function: "#fabd2f" },
+    light: { keyword: "#af3a03", string: "#79740e", number: "#8f3f71", comment: "#928374", property: "#076678", function: "#b57614" },
+  },
+  solarized: {
+    dark: { keyword: "#93a1a1", string: "#2aa198", number: "#d33682", comment: "#586e75", property: "#268bd2", function: "#268bd2" },
+    light: { keyword: "#586e75", string: "#2aa198", number: "#d33682", comment: "#93a1a1", property: "#268bd2", function: "#268bd2" },
+  },
+  "tokyo-night": {
+    dark: { keyword: "#9d7cd8", string: "#9ece6a", number: "#ff9e64", comment: "#51597d", property: "#ff9e64", function: "#7aa2f7" },
+    light: FALLBACK_SYNTAX_ROLES.light,
+  },
+  nord: {
+    dark: { keyword: "#81a1c1", string: "#a3be8c", number: "#b48ead", comment: "#616e88", property: "#d8dee9", function: "#88c0d0" },
+    light: FALLBACK_SYNTAX_ROLES.light,
+  },
+  dracula: {
+    dark: { keyword: "#ff79c6", string: "#f1fa8c", number: "#bd93f9", comment: "#6272a4", property: "#bd93f9", function: "#50fa7b" },
+    light: FALLBACK_SYNTAX_ROLES.light,
+  },
+};
+
 export function buildThemeTokens(
   colors: PluginSurfaceColors,
   preferences: EnhancerPreferences = DEFAULT_PREFERENCES,
@@ -350,7 +398,14 @@ export function buildThemeTokens(
   const platform = options.platform ?? STATIC_PLATFORM;
   const typography = resolveTypography(options.theme, preferences, platform, options.appearance ?? null);
   const isDark = isDarkSurface(colors.surface0);
-  const roles = options.syntaxRoles ?? FALLBACK_SYNTAX_ROLES[isDark ? "dark" : "light"];
+  const scheme = isDark ? "dark" : "light";
+  const syntaxTheme = options.syntaxTheme ?? DEFAULT_SYNTAX_THEME;
+  // In order of trust: what the caller was told by the daemon, what any earlier
+  // block was told, this theme's own probed palette, and only then GitHub.
+  const roles = options.syntaxRoles
+    ?? readSyntaxRoles(syntaxTheme, isDark)
+    ?? THEME_SYNTAX_ROLES[syntaxTheme]?.[scheme]
+    ?? FALLBACK_SYNTAX_ROLES[scheme];
   const fg = colors.foreground;
   const accent = ACCENT_PRESETS[preferences.accent] ?? colors.accent;
   // Status colours are the host's roles; the constants only cover a host
@@ -377,7 +432,7 @@ export function buildThemeTokens(
 
   return {
     isDark,
-    syntaxTheme: options.syntaxTheme ?? DEFAULT_SYNTAX_THEME,
+    syntaxTheme,
     platform,
     fontMono: typography.mono.family,
     fontUi: interfaceFamily(typography, preferences.uiFont, platform),

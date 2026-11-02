@@ -30,12 +30,20 @@ const NORD: SyntaxRoles = {
 };
 
 describe("the local tokeniser follows the reader's syntax theme", () => {
-  it("keeps the GitHub pair until the daemon names a palette", () => {
-    expect(buildThemeTokens(SURFACE).syntax.keyword).toBe("#f47067");
-    expect(buildThemeTokens({ ...SURFACE, surface0: "#fbfcfd" }).syntax.keyword).toBe("#cf222e");
+  it("names a palette before any answer has arrived", () => {
+    // Without this the first fences of a fresh session drew the built-in GitHub
+    // pair until some block finished and reported the theme's colours.
+    expect(buildThemeTokens(SURFACE, undefined, { syntaxTheme: "tokyo-night" }).syntax.keyword).toBe("#9d7cd8");
+    expect(buildThemeTokens({ ...SURFACE, surface0: "#fbfcfd" }, undefined, { syntaxTheme: "one" }).syntax.keyword)
+      .toBe("#a626a4");
+    // A family Shiki ships no light flavour for follows the daemon's mapping.
+    expect(buildThemeTokens({ ...SURFACE, surface0: "#fbfcfd" }, undefined, { syntaxTheme: "nord" }).syntax.keyword)
+      .toBe("#cf222e");
   });
 
   it("draws every role from the palette the daemon answered with", () => {
+    // What the daemon reported for `property` differs from the copied table,
+    // so this also pins the order of trust.
     const syntax = buildThemeTokens(SURFACE, undefined, { syntaxTheme: "nord", syntaxRoles: NORD }).syntax;
     expect(syntax).toMatchObject(NORD);
   });
