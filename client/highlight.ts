@@ -1,9 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRpc } from "@getpaseo/plugin/client";
-import { highlightRpc, type HighlightLine, type HighlightToken } from "../shared/highlight-rpc";
+import {
+  highlightRpc,
+  type HighlightLine,
+  type HighlightToken,
+  type SyntaxRoles,
+} from "../shared/highlight-rpc";
 import { perfCount, probeHighlightRpc } from "./debug/perf";
 
-export type { HighlightLine, HighlightToken };
+export type { HighlightLine, HighlightToken, SyntaxRoles };
 
 export interface HighlightRequest {
   code: string;
@@ -11,6 +16,8 @@ export interface HighlightRequest {
   filename?: string;
   dark: boolean;
   diffBodyCode?: string;
+  /** Paseo's Appearance > Syntax theme id, so the daemon picks the reader's palette. */
+  syntaxTheme?: string;
   /** False: answer from the cache only and never call the daemon. */
   enabled?: boolean;
 }
@@ -82,6 +89,7 @@ function fnv1a(str: string): string {
 function cacheKey(request: HighlightRequest): string {
   return [
     request.dark ? "dark" : "light",
+    request.syntaxTheme ?? "",
     request.language ?? "",
     request.filename ?? "",
     String(request.code.length),
@@ -162,8 +170,81 @@ type HighlightCall = (input: {
   language?: string;
   filename?: string;
   dark: boolean;
+  syntaxTheme?: string;
   diffBodyCode?: string;
 }) => Promise<unknown>;
+
+/**
+ * The palette the daemon highlighted with, per syntax theme and scheme.
+ *
+ * The client's own tokeniser needs six role colours to draw a block before any
+ * answer arrives, and it has no theme data of its own — Shiki lives on the
+ * daemon. So each answer carries those six, and they outlive the block that
+ * fetched them: one round trip per theme switch, none per block after that.
+ */
+const ROLE_KEYS = ["keyword", "string", "number", "comment", "property", "function"] as const;
+const roleCache = new Map<string, SyntaxRoles>();
+const roleListeners = new Set<() => void>();
+/** Themes already asked about this session, whether or not they answered. */
+const rolesAsked = new Set<string>();
+
+function roleKey(syntaxTheme: string, dark: boolean): string {
+  return `${syntaxTheme}\u0000${dark ? "dark" : "light"}`;
+}
+
+/** The daemon's answer, trusted only as far as six `#rrggbb` strings. */
+function readRoles(answer: unknown): SyntaxRoles | null {
+  if (typeof answer !== "object" || answer === null) return null;
+  const raw: unknown = "roles" in answer ? answer.roles : undefined;
+  if (typeof raw !== "object" || raw === null) return null;
+  const record = raw as Record<string, unknown>;
+  const roles = {} as SyntaxRoles;
+  for (const role of ROLE_KEYS) {
+    const color = record[role];
+    if (typeof color !== "string" || !/^#[0-9a-f]{6}([0-9a-f]{2})?$/i.test(color)) return null;
+    roles[role] = color;
+  }
+  return roles;
+}
+
+function rememberRoles(key: string, answer: unknown): void {
+  const roles = readRoles(answer);
+  if (roles === null || roleCache.get(key) !== undefined) return;
+  // The stored object is what subscribers compare by identity, so a palette
+  // seen twice does not restyle the timeline.
+  roleCache.set(key, roles);
+  for (const listener of roleListeners) listener();
+}
+
+export function readSyntaxRoles(syntaxTheme: string, dark: boolean): SyntaxRoles | null {
+  return roleCache.get(roleKey(syntaxTheme, dark)) ?? null;
+}
+
+export function subscribeSyntaxRoles(listener: () => void): () => void {
+  roleListeners.add(listener);
+  return () => {
+    roleListeners.delete(listener);
+  };
+}
+
+/**
+ * One cheap ask for the palette alone: empty code tokenises nothing, and the
+ * answer still carries the six colours.
+ *
+ * Asked once per theme and scheme and never again, even when it fails or comes
+ * back without colours — an older daemon has no `roles` to give, and asking
+ * every time a block mounts would be worse than the GitHub colours the client
+ * already draws with. A theme switch starts a new key, so a retry needs no
+ * timer here.
+ */
+function fetchRoles(key: string, call: HighlightCall, syntaxTheme: string, dark: boolean): void {
+  if (rolesAsked.has(key)) return;
+  rolesAsked.add(key);
+  void call({ code: "", language: "text", dark, syntaxTheme })
+    .then((answer) => rememberRoles(key, answer))
+    // The outcome is already recorded above; a rejection must not surface.
+    .catch(() => {});
+}
 
 /**
  * One call per key. A second mount of the same block joins the promise already
@@ -179,10 +260,14 @@ function fetchLines(key: string, call: HighlightCall, request: HighlightRequest)
     language: request.language,
     filename: request.filename,
     dark: request.dark,
+    syntaxTheme: request.syntaxTheme,
     diffBodyCode: request.diffBodyCode ? request.diffBodyCode : undefined,
   })
     .then((answer) => {
       remember(key, readResponse(answer, isPlainHint(request.language)));
+      if (request.syntaxTheme !== undefined) {
+        rememberRoles(roleKey(request.syntaxTheme, request.dark), answer);
+      }
     })
     .catch(() => {
       remember(key, null);
@@ -202,12 +287,19 @@ function fetchLines(key: string, call: HighlightCall, request: HighlightRequest)
  */
 export function useHighlightedLines(request: HighlightRequest): HighlightResponse {
   const call: HighlightCall = useRpc(highlightRpc);
-  const { code, language, filename, dark, diffBodyCode, enabled = true } = request;
+  const { code, language, filename, dark, syntaxTheme, diffBodyCode, enabled = true } = request;
+  // The palette a streaming block will need once it finishes costs one small
+  // round trip per theme switch, asked for here because an open fence never
+  // asks for tokens at all.
+  useEffect(() => {
+    if (syntaxTheme === undefined || readSyntaxRoles(syntaxTheme, dark) !== null) return;
+    fetchRoles(roleKey(syntaxTheme, dark), call, syntaxTheme, dark);
+  }, [syntaxTheme, dark, call]);
   const key = useMemo(() => {
     if (code.length === 0) return null;
     perfCount("highlight.cacheKey");
     return cacheKey(request);
-  }, [code, language, filename, dark, diffBodyCode]);
+  }, [code, language, filename, dark, syntaxTheme, diffBodyCode]);
   // Reading the cache during render, not in an effect, is what removes the
   // unhighlighted frame on a block that was tokenised once already.
   const cached = key !== null ? (cache.get(key) ?? null) : null;
@@ -216,13 +308,13 @@ export function useHighlightedLines(request: HighlightRequest): HighlightRespons
   useEffect(() => {
     if (!enabled || key === null || cache.has(key)) return;
     let mounted = true;
-    void fetchLines(key, call, { code, language, filename, dark, diffBodyCode }).then(() => {
+    void fetchLines(key, call, { code, language, filename, dark, syntaxTheme, diffBodyCode }).then(() => {
       if (mounted) bumpRevision((revision) => revision + 1);
     });
     return () => {
       mounted = false;
     };
-  }, [key, call, code, language, filename, dark, diffBodyCode, enabled]);
+  }, [key, call, code, language, filename, dark, syntaxTheme, diffBodyCode, enabled]);
 
   return cached ?? EMPTY_RESPONSE;
 }

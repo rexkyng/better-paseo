@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import type { PluginTheme } from "@getpaseo/plugin";
 import {
   DEFAULT_PREFERENCES,
@@ -19,7 +19,14 @@ import {
 import { currentPlatform } from "../ui/tokens/platform";
 import { themeKey } from "../ui/tokens/theme-key";
 import { ensureEmbeddedFonts } from "./embed-fonts";
-import { useHostAppearance, type HostAppearance } from "../ui/tokens/host-appearance-shim";
+import {
+  useHostAppearance,
+  useHostSyntaxTheme,
+  DEFAULT_SYNTAX_THEME,
+  type HostAppearance,
+  type PaseoSyntaxThemeId,
+} from "../ui/tokens/host-appearance-shim";
+import { readSyntaxRoles, subscribeSyntaxRoles, type SyntaxRoles } from "../highlight";
 
 export type PluginSurfaceColors = PluginTheme["colors"];
 
@@ -80,6 +87,12 @@ export interface Elevation {
 
 export interface ExtendedThemeTokens {
   isDark: boolean;
+  /**
+   * Paseo's Appearance > Syntax theme id, which decides what colour code gets.
+   * The host gives plugins eleven surface colours and no syntax palette, so
+   * this comes from its settings (read-only shim).
+   */
+  syntaxTheme: PaseoSyntaxThemeId;
   /**
    * The platform these tokens draw for: the running one, except in the
    * settings page's mobile preview, which draws a phone's rows on the web.
@@ -296,7 +309,38 @@ export interface ThemeTokenOptions {
   theme?: unknown;
   /** Paseo's Appearance settings from the read-only shim (plan D10 level 2). */
   appearance?: HostAppearance | null;
+  /** Paseo's Appearance > Syntax theme id. */
+  syntaxTheme?: PaseoSyntaxThemeId;
+  /**
+   * The daemon's own role colours for that theme, once it has answered. Until
+   * then the built-in pair below colours the local tokeniser.
+   */
+  syntaxRoles?: SyntaxRoles | null;
 }
+
+/**
+ * GitHub Dark Dimmed / GitHub Light, as far as the six roles go: what the local
+ * tokeniser draws before the daemon has named a palette, and what every caller
+ * outside a renderer (the settings previews) keeps.
+ */
+const FALLBACK_SYNTAX_ROLES = {
+  dark: {
+    keyword: "#f47067",
+    string: "#96d0ff",
+    number: "#6cb6ff",
+    comment: "#768390",
+    property: "#6cb6ff",
+    function: "#dcbdfb",
+  },
+  light: {
+    keyword: "#cf222e",
+    string: "#0a3069",
+    number: "#0550ae",
+    comment: "#6e7781",
+    property: "#0550ae",
+    function: "#8250df",
+  },
+} as const satisfies Record<"dark" | "light", SyntaxRoles>;
 
 export function buildThemeTokens(
   colors: PluginSurfaceColors,
@@ -306,6 +350,7 @@ export function buildThemeTokens(
   const platform = options.platform ?? STATIC_PLATFORM;
   const typography = resolveTypography(options.theme, preferences, platform, options.appearance ?? null);
   const isDark = isDarkSurface(colors.surface0);
+  const roles = options.syntaxRoles ?? FALLBACK_SYNTAX_ROLES[isDark ? "dark" : "light"];
   const fg = colors.foreground;
   const accent = ACCENT_PRESETS[preferences.accent] ?? colors.accent;
   // Status colours are the host's roles; the constants only cover a host
@@ -332,6 +377,7 @@ export function buildThemeTokens(
 
   return {
     isDark,
+    syntaxTheme: options.syntaxTheme ?? DEFAULT_SYNTAX_THEME,
     platform,
     fontMono: typography.mono.family,
     fontUi: interfaceFamily(typography, preferences.uiFont, platform),
@@ -405,14 +451,16 @@ export function buildThemeTokens(
       elevation: { overlay: overlayShadow },
     },
 
-    // GitHub Dark Dimmed / GitHub Light
+    // Code colours follow the reader's Paseo syntax theme: the six roles come
+    // from the theme the daemon highlighted with. Diff tints stay the host's
+    // status colours, which are not part of a syntax theme.
     syntax: {
-      keyword: isDark ? "#f47067" : "#cf222e",
-      string: isDark ? "#96d0ff" : "#0a3069",
-      number: isDark ? "#6cb6ff" : "#0550ae",
-      comment: isDark ? "#768390" : "#6e7781",
-      property: isDark ? "#6cb6ff" : "#0550ae",
-      function: isDark ? "#dcbdfb" : "#8250df",
+      keyword: roles.keyword,
+      string: roles.string,
+      number: roles.number,
+      comment: roles.comment,
+      property: roles.property,
+      function: roles.function,
       diffAddBg: withAlpha(success, diffTint),
       diffAddMarker: success,
       diffRemoveBg: withAlpha(danger, diffTint),
@@ -440,6 +488,15 @@ export function useThemeTokens(
   // The value keeps its identity until it changes. H1 takes precedence and
   // the hook stops reading.
   const appearance = useHostAppearance(readHostTypography(theme) === null, theme);
+  // Paseo's syntax theme and, once the daemon has named it, that theme's own
+  // role colours. Both are shared stores: one look per 500 ms, one RPC per
+  // theme switch, and their identity only changes when the value does.
+  const syntaxTheme = useHostSyntaxTheme(theme);
+  const syntaxRoles = useSyncExternalStore(
+    subscribeSyntaxRoles,
+    () => readSyntaxRoles(syntaxTheme, isDarkSurface(theme.colors.surface0)),
+    () => null,
+  );
   // The drawer's pinch zoom is no part of the tokens: saving it must not
   // restyle every row of the timeline.
   const drawn = useRef(preferences);
@@ -449,10 +506,16 @@ export function useThemeTokens(
     () => {
       // Inter is installed only once a reader picks it.
       ensureEmbeddedFonts(tokenPreferences, resolvedPlatform);
-      return buildThemeTokens(theme.colors, tokenPreferences, { platform, theme, appearance });
+      return buildThemeTokens(theme.colors, tokenPreferences, {
+        platform,
+        theme,
+        appearance,
+        syntaxTheme,
+        syntaxRoles,
+      });
     },
     // `theme` is read through `key`; its identity is exactly what must not count.
-    [key, tokenPreferences, platform, appearance],
+    [key, tokenPreferences, platform, appearance, syntaxTheme, syntaxRoles],
   );
 }
 

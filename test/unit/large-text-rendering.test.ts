@@ -3,7 +3,7 @@ import TestRenderer, { act, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "./helpers/quiet-renderer";
 
-const rpc = vi.hoisted(() => ({ call: vi.fn(async () => null) }));
+const rpc = vi.hoisted(() => ({ call: vi.fn(async (_input: unknown) => null) }));
 const clipboard = vi.hoisted(() => ({ copyText: vi.fn(async (_text: string) => {}) }));
 vi.mock("react-native", () => import("./helpers/rn-mock"));
 vi.mock("@getpaseo/plugin/client", () => ({ useRpc: () => rpc.call }));
@@ -110,7 +110,11 @@ describe.each(["ios", "android"])("large native previews on %s", (os) => {
     const fills = renderer.root.findAll((node) => (node.type as unknown) === "View" && Array.isArray(node.props.style)
       && node.props.style.some((part: { backgroundColor?: string } | null) => part?.backgroundColor === tokens.syntax.diffAddBg || part?.backgroundColor === tokens.syntax.diffRemoveBg));
     expect(fills).toHaveLength(2);
-    expect(rpc.call).not.toHaveBeenCalled();
+    // The streaming preview must not have anything tokenised. One palette ask
+    // is allowed and wanted: it carries empty code, so the daemon re-tokenises
+    // nothing, and it is what lets the local diff fills follow the reader's
+    // syntax theme before the tool call finishes.
+    expect(rpc.call.mock.calls.filter(([request]) => (request as { code?: string }).code !== "")).toHaveLength(0);
   });
 
   it("bounds a minified line, retains its source number only once, and loads its end", () => {

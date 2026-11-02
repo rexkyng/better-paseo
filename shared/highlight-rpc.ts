@@ -14,6 +14,22 @@ const highlightToken = z.object({
 const highlightLine = z.array(highlightToken);
 
 /**
+ * The six colours a theme gives the roles the client's own tokeniser knows.
+ *
+ * The daemon reads them out of the TextMate theme it highlighted with, so the
+ * client can colour a block while it streams — before any answer arrives — in
+ * the same palette as the finished block, instead of a hard-coded one.
+ */
+const syntaxRoles = z.object({
+  keyword: z.string(),
+  string: z.string(),
+  number: z.string(),
+  comment: z.string(),
+  property: z.string(),
+  function: z.string(),
+});
+
+/**
  * Tokenises a code block with TextMate grammars.
  *
  * The grammars live on the daemon, not in the client, for two reasons. The
@@ -35,6 +51,8 @@ export const highlightRpc = defineRpc({
     filename: z.string().optional(),
     dark: z.boolean(),
     diffBodyCode: z.string().optional(),
+    /** Paseo's Appearance > Syntax theme id; absent means the daemon's own GitHub pair. */
+    syntaxTheme: z.string().optional(),
   }),
   output: z.object({
     /** One entry per code line, in order; each line is its tokens in order. */
@@ -43,8 +61,11 @@ export const highlightRpc = defineRpc({
     /** The resolved shiki language id, or null when nothing matched and the text came back unhighlighted. */
     language: z.string().nullable(),
     theme: z.string(),
+    /** Only present when the request named a `syntaxTheme`: that theme's role colours. */
+    roles: syntaxRoles.optional(),
   }),
 });
 
 export type HighlightToken = z.infer<typeof highlightToken>;
 export type HighlightLine = z.infer<typeof highlightLine>;
+export type SyntaxRoles = z.infer<typeof syntaxRoles>;
