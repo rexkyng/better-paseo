@@ -181,12 +181,12 @@ type HighlightCall = (input: {
  * answer arrives, and it has no theme data of its own — Shiki lives on the
  * daemon. So each answer carries those six, and they outlive the block that
  * fetched them: one round trip per theme switch, none per block after that.
+ * Nothing asks for the palette by itself: every normal answer carries it, so the
+ * first completed block of a session is what teaches the rest.
  */
 const ROLE_KEYS = ["keyword", "string", "number", "comment", "property", "function"] as const;
 const roleCache = new Map<string, SyntaxRoles>();
 const roleListeners = new Set<() => void>();
-/** Themes already asked about this session, whether or not they answered. */
-const rolesAsked = new Set<string>();
 
 function roleKey(syntaxTheme: string, dark: boolean): string {
   return `${syntaxTheme}\u0000${dark ? "dark" : "light"}`;
@@ -225,25 +225,6 @@ export function subscribeSyntaxRoles(listener: () => void): () => void {
   return () => {
     roleListeners.delete(listener);
   };
-}
-
-/**
- * One cheap ask for the palette alone: empty code tokenises nothing, and the
- * answer still carries the six colours.
- *
- * Asked once per theme and scheme and never again, even when it fails or comes
- * back without colours — an older daemon has no `roles` to give, and asking
- * every time a block mounts would be worse than the GitHub colours the client
- * already draws with. A theme switch starts a new key, so a retry needs no
- * timer here.
- */
-function fetchRoles(key: string, call: HighlightCall, syntaxTheme: string, dark: boolean): void {
-  if (rolesAsked.has(key)) return;
-  rolesAsked.add(key);
-  void call({ code: "", language: "text", dark, syntaxTheme })
-    .then((answer) => rememberRoles(key, answer))
-    // The outcome is already recorded above; a rejection must not surface.
-    .catch(() => {});
 }
 
 /**
@@ -288,13 +269,6 @@ function fetchLines(key: string, call: HighlightCall, request: HighlightRequest)
 export function useHighlightedLines(request: HighlightRequest): HighlightResponse {
   const call: HighlightCall = useRpc(highlightRpc);
   const { code, language, filename, dark, syntaxTheme, diffBodyCode, enabled = true } = request;
-  // The palette a streaming block will need once it finishes costs one small
-  // round trip per theme switch, asked for here because an open fence never
-  // asks for tokens at all.
-  useEffect(() => {
-    if (syntaxTheme === undefined || readSyntaxRoles(syntaxTheme, dark) !== null) return;
-    fetchRoles(roleKey(syntaxTheme, dark), call, syntaxTheme, dark);
-  }, [syntaxTheme, dark, call]);
   const key = useMemo(() => {
     if (code.length === 0) return null;
     perfCount("highlight.cacheKey");

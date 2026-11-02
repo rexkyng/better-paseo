@@ -16,7 +16,7 @@ const highlightLine = z.array(highlightToken);
 /**
  * The six colours a theme gives the roles the client's own tokeniser knows.
  *
- * The daemon reads them out of the TextMate theme it highlighted with, so the
+ * The daemon reads them out of a fixed sample it highlights with that theme, so the
  * client can colour a block while it streams — before any answer arrives — in
  * the same palette as the finished block, instead of a hard-coded one.
  */

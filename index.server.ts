@@ -148,115 +148,68 @@ function openWithShell(target: string, entry: PathEntry): void {
 const DARK_THEME = "github-dark-default";
 const LIGHT_THEME = "github-light-default";
 
+/** One Shiki theme: the name it registers under, and how to fetch its data. */
+type ThemeSource = [name: string, load: () => Promise<unknown>];
+/** The dark and light theme of one Paseo syntax family. */
+type ThemePair = readonly [dark: ThemeSource, light: ThemeSource];
+
+// esbuild cannot follow a computed specifier, so every theme carries its own
+// literal import; none of them runs until a request names that theme.
+const GITHUB: ThemePair = [
+  [DARK_THEME, () => import("@shikijs/themes/github-dark-default")],
+  [LIGHT_THEME, () => import("@shikijs/themes/github-light-default")],
+];
+
 /**
- * Paseo's Appearance → Syntax theme ids, as the Shiki theme for each scheme.
+ * Paseo's Appearance > Syntax theme ids, as the Shiki theme for each scheme.
  *
  * The id names the palette family; the scheme comes from the client, because
  * one daemon serves readers in light and dark at the same time. Shiki 4.4.3
- * ships no light flavour for Tokyo Night, Nord or Dracula, so those three keep
- * GitHub Light in light mode rather than an invented palette.
+ * ships no light flavour for Tokyo Night, Nord or Dracula, so those three reuse
+ * GitHub Light in light mode rather than inventing a palette.
  */
-const SYNTAX_THEMES: Record<string, readonly [dark: string, light: string]> = {
-  github: [DARK_THEME, LIGHT_THEME],
-  one: ["one-dark-pro", "one-light"],
-  catppuccin: ["catppuccin-mocha", "catppuccin-latte"],
-  gruvbox: ["gruvbox-dark-medium", "gruvbox-light-medium"],
-  solarized: ["solarized-dark", "solarized-light"],
-  "tokyo-night": ["tokyo-night", LIGHT_THEME],
-  nord: ["nord", LIGHT_THEME],
-  dracula: ["dracula", LIGHT_THEME],
+const SYNTAX_THEMES: Record<string, ThemePair> = {
+  github: GITHUB,
+  one: [
+    ["one-dark-pro", () => import("@shikijs/themes/one-dark-pro")],
+    ["one-light", () => import("@shikijs/themes/one-light")],
+  ],
+  catppuccin: [
+    ["catppuccin-mocha", () => import("@shikijs/themes/catppuccin-mocha")],
+    ["catppuccin-latte", () => import("@shikijs/themes/catppuccin-latte")],
+  ],
+  gruvbox: [
+    ["gruvbox-dark-medium", () => import("@shikijs/themes/gruvbox-dark-medium")],
+    ["gruvbox-light-medium", () => import("@shikijs/themes/gruvbox-light-medium")],
+  ],
+  solarized: [
+    ["solarized-dark", () => import("@shikijs/themes/solarized-dark")],
+    ["solarized-light", () => import("@shikijs/themes/solarized-light")],
+  ],
+  "tokyo-night": [["tokyo-night", () => import("@shikijs/themes/tokyo-night")], GITHUB[1]],
+  nord: [["nord", () => import("@shikijs/themes/nord")], GITHUB[1]],
+  dracula: [["dracula", () => import("@shikijs/themes/dracula")], GITHUB[1]],
 };
 
 /**
- * Every theme the map above can name. esbuild cannot follow a computed
- * specifier, so each one needs its own literal import; they are only evaluated
- * when a reader actually uses that theme.
- */
-const THEME_MODULES: Record<string, () => Promise<{ default: TextMateTheme }>> = {
-  "github-dark-default": () => import("@shikijs/themes/github-dark-default"),
-  "github-light-default": () => import("@shikijs/themes/github-light-default"),
-  "one-dark-pro": () => import("@shikijs/themes/one-dark-pro"),
-  "one-light": () => import("@shikijs/themes/one-light"),
-  "catppuccin-mocha": () => import("@shikijs/themes/catppuccin-mocha"),
-  "catppuccin-latte": () => import("@shikijs/themes/catppuccin-latte"),
-  "gruvbox-dark-medium": () => import("@shikijs/themes/gruvbox-dark-medium"),
-  "gruvbox-light-medium": () => import("@shikijs/themes/gruvbox-light-medium"),
-  "solarized-dark": () => import("@shikijs/themes/solarized-dark"),
-  "solarized-light": () => import("@shikijs/themes/solarized-light"),
-  "tokyo-night": () => import("@shikijs/themes/tokyo-night"),
-  nord: () => import("@shikijs/themes/nord"),
-  dracula: () => import("@shikijs/themes/dracula"),
-};
-
-/**
- * A Shiki theme, only as far as this file reads it.
+ * What each of the client's six roles looks like in this theme.
  *
- * `@shikijs/themes` types its default through the `shiki` package, which is not
- * installed here, so the shape a caller can rely on is described locally.
+ * Highlighting one fixed line answers this exactly, because Shiki has already
+ * resolved the scopes — reading the theme's `tokenColors` by hand would mean
+ * matching broad rules like `variable` against narrow ones like
+ * `variable.other.property`, which is how the wrong colour gets picked. Only
+ * the marker words need to be distinctive, so no other run contains one.
  */
-interface TextMateTheme {
-  tokenColors?: { scope?: string | string[]; settings?: { foreground?: string } }[];
-  colors?: Record<string, string>;
-}
-
-/**
- * The scopes the client's own tokeniser knows a colour for, best match first.
- * Its six role names are fixed by `renderSyntaxLine`; these are only where a
- * theme keeps them.
- */
-const ROLE_SCOPES: Record<keyof SyntaxRoles, string[]> = {
-  keyword: ["keyword", "keyword.control", "storage.type"],
-  string: ["string", "string.quoted.single"],
-  number: ["constant.numeric"],
-  comment: ["comment"],
-  property: ["variable.other.object.property", "variable.other.property", "entity.name.tag", "variable"],
-  function: ["entity.name.function", "support.function"],
+const PROBE_CODE = '// BANANA\nconst APPLE = 7;\nfig.KIWI = MANGO("PEACH");';
+const PROBE_MARKERS: Record<keyof SyntaxRoles, string> = {
+  keyword: "const",
+  string: "PEACH",
+  number: "7",
+  comment: "BANANA",
+  property: "KIWI",
+  function: "MANGO",
 };
-
-/**
- * A rule colours a wanted scope when the wanted scope is that rule or sits
- * under it (`keyword` covers `keyword.control`). Specificity wins over order,
- * then a later rule wins over an earlier one, as Shiki itself resolves them.
- */
-function foregroundFor(rules: TextMateTheme["tokenColors"], candidates: string[]): string | undefined {
-  let best: { rank: number; length: number; color: string } | null = null;
-  for (const rule of rules ?? []) {
-    const color = rule.settings?.foreground;
-    if (!color) continue;
-    const scopes = Array.isArray(rule.scope) ? rule.scope : String(rule.scope ?? "").split(",");
-    for (const entry of scopes) {
-      const scope = entry.trim();
-      if (!scope) continue;
-      const rank = candidates.findIndex((want) => want === scope || want.startsWith(`${scope}.`));
-      if (rank === -1) continue;
-      if (best === null || rank < best.rank || (rank === best.rank && scope.length >= best.length)) {
-        best = { rank, length: scope.length, color };
-      }
-    }
-  }
-  return best?.color;
-}
-
-/**
- * The six colours this theme gives the client's roles, so a block being typed
- * out matches the finished block. Null when the theme is not a TextMate one.
- */
-function deriveRoles(theme: TextMateTheme): SyntaxRoles | null {
-  const fallback = theme.colors?.["editor.foreground"];
-  if (fallback === undefined) return null;
-  const rules = theme.tokenColors;
-  if (rules === undefined) return null;
-  const roles = {} as SyntaxRoles;
-  for (const [role, candidates] of Object.entries(ROLE_SCOPES) as [
-    keyof SyntaxRoles,
-    string[],
-  ][]) {
-    const color = foregroundFor(rules, candidates) ?? fallback;
-    if (!/^#[0-9a-f]{6}([0-9a-f]{2})?$/i.test(color)) return null;
-    roles[role] = color;
-  }
-  return roles;
-}
+const HEX_COLOR = /^#[0-9a-f]{6}([0-9a-f]{2})?$/i;
 
 
 /**
@@ -421,38 +374,49 @@ async function buildEngine(): Promise<HighlightEngine> {
   };
 }
 
-/** Role colours per theme name, read off the TextMate rules once per theme. */
+/** Role colours per theme name, probed from Shiki's own tokens once per theme. */
 const roleCache = new Map<string, SyntaxRoles>();
 
 /**
- * Loads the theme a request names, unless the engine already has it, hands back
- * the name to highlight with — the requested one, or the GitHub pair for an id
- * this daemon's table does not know — and keeps that theme's role colours.
+ * Makes `theme` usable: loaded into the engine if it is not yet, and its role
+ * colours probed once. Themes come and go as readers switch, so both are lazy
+ * and neither is undone.
  */
-async function useTheme(engine: HighlightEngine, requested: string, dark: boolean): Promise<string> {
-  const load = THEME_MODULES[requested];
-  if (load === undefined) return dark ? DARK_THEME : LIGHT_THEME;
-  if (!engine.themes.has(requested)) {
+async function useTheme(engine: HighlightEngine, theme: string, load: () => Promise<unknown>): Promise<void> {
+  if (!engine.themes.has(theme)) {
     const mod = await load();
     // Handing the module over is what Shiki expects from a dynamic import; the
     // type says the same, it just cannot name the theme fields through `shiki`.
     await engine.highlighter.loadTheme(mod as unknown as Parameters<Highlighter["loadTheme"]>[0]);
-    engine.themes.add(requested);
+    engine.themes.add(theme);
   }
-  if (!roleCache.has(requested)) {
-    // Including the GitHub pair, which came with the engine and so was never
-    // read here before: a client that named "github" still wants its colours.
-    const roles = deriveRoles((await load()).default);
-    if (roles !== null) roleCache.set(requested, roles);
+  if (!roleCache.has(theme)) {
+    const roles = await probeRoles(engine, theme);
+    if (roles !== null) roleCache.set(theme, roles);
   }
-  return requested;
 }
 
-/** The Shiki theme for a request: Paseo's syntax id plus the client's scheme. */
-function requestedTheme(syntaxTheme: string | undefined, dark: boolean): string {
-  const pair = syntaxTheme === undefined ? undefined : SYNTAX_THEMES[syntaxTheme];
-  if (pair === undefined) return dark ? DARK_THEME : LIGHT_THEME;
-  return dark ? pair[0] : pair[1];
+/**
+ * The theme's six role colours, from the tokens Shiki itself produced. Null
+ * when the grammar gave no answer for one of them, which leaves the client on
+ * the palette it already has rather than half a theme.
+ */
+async function probeRoles(engine: HighlightEngine, theme: string): Promise<SyntaxRoles | null> {
+  try {
+    const tokens = engine.highlighter
+      .codeToTokens(PROBE_CODE, { lang: "typescript", theme })
+      .tokens
+      .flat();
+    const roles = {} as SyntaxRoles;
+    for (const [role, marker] of Object.entries(PROBE_MARKERS) as [keyof SyntaxRoles, string][]) {
+      const color = tokens.find((token) => token.content.includes(marker))?.color;
+      if (typeof color !== "string" || !HEX_COLOR.test(color)) return null;
+      roles[role] = color;
+    }
+    return roles;
+  } catch {
+    return null;
+  }
 }
 
 function getEngine(): Promise<HighlightEngine> {
@@ -699,12 +663,16 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.handle(highlightRpc, async (input) => {
-    let theme = requestedTheme(input.syntaxTheme, input.dark);
+    // An id this daemon's table does not know, and a client that names no id at
+    // all, both draw with the GitHub pair; only a named id gets its colours
+    // back, so a mismatch can never be reported as the theme that was asked for.
+    const pair = input.syntaxTheme === undefined ? undefined : SYNTAX_THEMES[input.syntaxTheme];
+    const [theme, load] = pair === undefined ? GITHUB[input.dark ? 0 : 1] : pair[input.dark ? 0 : 1];
     try {
       const engine = await getEngine();
       // A reader may switch syntax theme while this daemon runs, so the theme
       // is loaded on request rather than with the engine.
-      theme = await useTheme(engine, theme, input.dark);
+      await useTheme(engine, theme, load);
       const language = resolveLanguage(engine.loaded, input.language, input.filename);
       const lines = tokenize(engine.highlighter, input.code, language, theme);
 
@@ -716,7 +684,7 @@ export default function contribute(server: PluginServerContext) {
 
       // Only a client that named a theme can use the palette; an older one
       // compares this response byte for byte against what it knew.
-      const roles = input.syntaxTheme === undefined ? undefined : roleCache.get(theme);
+      const roles = pair === undefined ? undefined : roleCache.get(theme);
       return {
         lines,
         ...(diffLines !== undefined ? { diffLines } : {}),
