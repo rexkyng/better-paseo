@@ -14,7 +14,6 @@ import {
   type HighlightLine,
   type HighlightToken,
   highlightRpc,
-  type SyntaxRoles,
 } from "./shared/highlight-rpc";
 import { imageRpc } from "./shared/image-rpc";
 import { markBitmapsRpc } from "./shared/mark-rpc";
@@ -192,27 +191,6 @@ const SYNTAX_THEMES: Record<string, ThemePair> = {
 };
 
 /**
- * What each of the client's six roles looks like in this theme.
- *
- * Highlighting one fixed line answers this exactly, because Shiki has already
- * resolved the scopes — reading the theme's `tokenColors` by hand would mean
- * matching broad rules like `variable` against narrow ones like
- * `variable.other.property`, which is how the wrong colour gets picked. Only
- * the marker words need to be distinctive, so no other run contains one.
- */
-const PROBE_CODE = '// BANANA\nconst APPLE = 7;\nfig.KIWI = MANGO("PEACH");';
-const PROBE_MARKERS: Record<keyof SyntaxRoles, string> = {
-  keyword: "const",
-  string: "PEACH",
-  number: "7",
-  comment: "BANANA",
-  property: "KIWI",
-  function: "MANGO",
-};
-const HEX_COLOR = /^#[0-9a-f]{6}([0-9a-f]{2})?$/i;
-
-
-/**
  * Tokenising runs on the daemon's event loop, so a runaway tool output would
  * stall every other request. Code past 400 KB or 4000 lines comes back
  * unhighlighted instead.
@@ -374,49 +352,17 @@ async function buildEngine(): Promise<HighlightEngine> {
   };
 }
 
-/** Role colours per theme name, probed from Shiki's own tokens once per theme. */
-const roleCache = new Map<string, SyntaxRoles>();
-
 /**
- * Makes `theme` usable: loaded into the engine if it is not yet, and its role
- * colours probed once. Themes come and go as readers switch, so both are lazy
- * and neither is undone.
+ * Loads `theme` into the engine if a reader asked for it before. Themes come and
+ * go as readers switch, so loading is lazy and never undone.
  */
-async function useTheme(engine: HighlightEngine, theme: string, load: () => Promise<unknown>): Promise<void> {
-  if (!engine.themes.has(theme)) {
-    const mod = await load();
-    // Handing the module over is what Shiki expects from a dynamic import; the
-    // type says the same, it just cannot name the theme fields through `shiki`.
-    await engine.highlighter.loadTheme(mod as unknown as Parameters<Highlighter["loadTheme"]>[0]);
-    engine.themes.add(theme);
-  }
-  if (!roleCache.has(theme)) {
-    const roles = await probeRoles(engine, theme);
-    if (roles !== null) roleCache.set(theme, roles);
-  }
-}
-
-/**
- * The theme's six role colours, from the tokens Shiki itself produced. Null
- * when the grammar gave no answer for one of them, which leaves the client on
- * the palette it already has rather than half a theme.
- */
-async function probeRoles(engine: HighlightEngine, theme: string): Promise<SyntaxRoles | null> {
-  try {
-    const tokens = engine.highlighter
-      .codeToTokens(PROBE_CODE, { lang: "typescript", theme })
-      .tokens
-      .flat();
-    const roles = {} as SyntaxRoles;
-    for (const [role, marker] of Object.entries(PROBE_MARKERS) as [keyof SyntaxRoles, string][]) {
-      const color = tokens.find((token) => token.content.includes(marker))?.color;
-      if (typeof color !== "string" || !HEX_COLOR.test(color)) return null;
-      roles[role] = color;
-    }
-    return roles;
-  } catch {
-    return null;
-  }
+async function ensureTheme(engine: HighlightEngine, theme: string, load: () => Promise<unknown>): Promise<void> {
+  if (engine.themes.has(theme)) return;
+  const mod = await load();
+  // Handing the module over is what Shiki expects from a dynamic import; the
+  // type says the same, it just cannot name the theme fields through `shiki`.
+  await engine.highlighter.loadTheme(mod as unknown as Parameters<Highlighter["loadTheme"]>[0]);
+  engine.themes.add(theme);
 }
 
 function getEngine(): Promise<HighlightEngine> {
@@ -664,15 +610,15 @@ export default function contribute(server: PluginServerContext) {
 
   server.handle(highlightRpc, async (input) => {
     // An id this daemon's table does not know, and a client that names no id at
-    // all, both draw with the GitHub pair; only a named id gets its colours
-    // back, so a mismatch can never be reported as the theme that was asked for.
-    const pair = input.syntaxTheme === undefined ? undefined : SYNTAX_THEMES[input.syntaxTheme];
-    const [theme, load] = pair === undefined ? GITHUB[input.dark ? 0 : 1] : pair[input.dark ? 0 : 1];
+    // all, both draw with the GitHub pair.
+    const scheme = input.dark ? 0 : 1;
+    const [theme, load] =
+      (input.syntaxTheme === undefined ? undefined : SYNTAX_THEMES[input.syntaxTheme])?.[scheme] ?? GITHUB[scheme];
     try {
       const engine = await getEngine();
       // A reader may switch syntax theme while this daemon runs, so the theme
       // is loaded on request rather than with the engine.
-      await useTheme(engine, theme, load);
+      await ensureTheme(engine, theme, load);
       const language = resolveLanguage(engine.loaded, input.language, input.filename);
       const lines = tokenize(engine.highlighter, input.code, language, theme);
 
@@ -682,15 +628,11 @@ export default function contribute(server: PluginServerContext) {
         diffLines = tokenize(engine.highlighter, input.diffBodyCode, diffLanguage, theme);
       }
 
-      // Only a client that named a theme can use the palette; an older one
-      // compares this response byte for byte against what it knew.
-      const roles = pair === undefined ? undefined : roleCache.get(theme);
       return {
         lines,
         ...(diffLines !== undefined ? { diffLines } : {}),
         language,
         theme,
-        ...(roles !== undefined ? { roles } : {}),
       };
     } catch {
       // A grammar fault must not kill the daemon, and the client still needs

@@ -1,22 +1,18 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { describe, expect, it } from "vitest";
-import type { SyntaxRoles } from "../../shared/highlight-rpc";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("react-native", () => import("./helpers/rn-mock"));
+
+import { buildThemeTokens } from "../../client/components/theme-tokens";
+import { PASEO_SYNTAX_THEMES, type PaseoSyntaxThemeId } from "../../client/ui/tokens/host-appearance-shim";
 
 interface Answer {
   lines: unknown[];
   language: string | null;
   theme: string;
-  roles?: SyntaxRoles;
 }
 
 type Handler = (input: unknown) => Promise<Answer>;
-
-/** Theme files spell their hexes in either case; fixtures do not care. */
-function lowerCaseRoles(roles: SyntaxRoles | undefined): Record<keyof SyntaxRoles, string> | undefined {
-  return roles === undefined
-    ? undefined
-    : (Object.fromEntries(Object.entries(roles).map(([role, color]) => [role, color.toLowerCase()])) as Record<keyof SyntaxRoles, string>);
-}
 
 /** The daemon's `highlight` handler, out of the route the plugin registers. */
 async function highlightHandler(): Promise<Handler> {
@@ -35,24 +31,34 @@ async function highlightHandler(): Promise<Handler> {
 
 const CODE = 'const x = 1;\nobj.method("text");\n// a comment';
 
-describe("the daemon follows Paseo's syntax theme", () => {
-  it("answers the GitHub pair and no roles for a client that names none", async () => {
-    const handler = await highlightHandler();
-    const answer = await handler({ code: CODE, language: "typescript", dark: true });
-    expect(answer.theme).toBe("github-dark-default");
-    expect(answer.roles).toBeUndefined();
-    // The same theme named explicitly does carry colours, so an id that maps to
-    // the pair the engine already loaded is not a special case.
-    await expect(handler({ code: CODE, language: "typescript", dark: true, syntaxTheme: "github" }))
-      .resolves.toMatchObject({ theme: "github-dark-default", roles: { keyword: expect.any(String) } });
-  }, 30_000);
+/** The surfaces the plugin treats as dark and light. */
+const DARK_SURFACE = {
+  surface0: "#0f1115", surface1: "#16191f", surface2: "#1d2128", border: "#2a2f37",
+  foreground: "#e6e8eb", foregroundMuted: "#9aa1ab", accent: "#4f8cff", accentForeground: "#ffffff",
+  statusSuccess: "#4cb782", statusWarning: "#d9a53f", statusDanger: "#e5484d",
+};
+const LIGHT_SURFACE = { ...DARK_SURFACE, surface0: "#fbfcfd" };
 
+/** The six roles the client colours a streaming fence with, for one id and scheme. */
+function clientPalette(syntaxTheme: PaseoSyntaxThemeId, dark: boolean): Record<string, string> {
+  const { keyword, string, number, comment, property, function: fn } =
+    buildThemeTokens(dark ? DARK_SURFACE : LIGHT_SURFACE, undefined, { syntaxTheme }).syntax;
+  // Theme files disagree about hex case, so compare without it.
+  return { keyword, string, number, comment, property, function: fn };
+}
+
+const normalise = (palette: Record<string, string>) =>
+  Object.fromEntries(Object.entries(palette).map(([role, color]) => [role, color.toLowerCase()]));
+
+describe("the daemon follows Paseo's syntax theme", () => {
   it.each([
     ["one", "dark", "one-dark-pro"],
     ["catppuccin", "light", "catppuccin-latte"],
     ["gruvbox", "dark", "gruvbox-dark-medium"],
     ["solarized", "light", "solarized-light"],
     ["tokyo-night", "dark", "tokyo-night"],
+    // A client that names no theme gets today's pair.
+    [undefined, "dark", "github-dark-default"],
     // Shiki ships no light flavour for these three, so the scheme keeps GitHub.
     ["nord", "light", "github-light-default"],
     ["dracula", "light", "github-light-default"],
@@ -68,47 +74,51 @@ describe("the daemon follows Paseo's syntax theme", () => {
     expect(answer.theme).toBe(theme);
   }, 30_000);
 
-  it("hands back the palette it highlighted with, per theme", async () => {
+  it("streams the same palette the daemon highlights with", async () => {
     const handler = await highlightHandler();
-    // Golden values, read off a highlighted sample of `const x = 1; // c
-    // obj.member = call("s")` for each theme. They catch a derivation that falls
-    // back to a theme's generic colours, which is how a mid-stream block ends up
-    // a different colour from the finished one.
-    const expected: Record<string, SyntaxRoles> = {
-      github: { keyword: "#ff7b72", string: "#a5d6ff", number: "#79c0ff", comment: "#8b949e", property: "#79c0ff", function: "#d2a8ff" },
-      one: { keyword: "#c678dd", string: "#98c379", number: "#d19a66", comment: "#7f848e", property: "#e06c75", function: "#61afef" },
-      catppuccin: { keyword: "#cba6f7", string: "#a6e3a1", number: "#fab387", comment: "#9399b2", property: "#fab387", function: "#89b4fa" },
-      gruvbox: { keyword: "#fe8019", string: "#b8bb26", number: "#d3869b", comment: "#928374", property: "#83a598", function: "#fabd2f" },
-      solarized: { keyword: "#93a1a1", string: "#2aa198", number: "#d33682", comment: "#586e75", property: "#268bd2", function: "#268bd2" },
-      "tokyo-night": { keyword: "#9d7cd8", string: "#9ece6a", number: "#ff9e64", comment: "#51597d", property: "#ff9e64", function: "#7aa2f7" },
-      nord: { keyword: "#81a1c1", string: "#a3be8c", number: "#b48ead", comment: "#616e88", property: "#d8dee9", function: "#88c0d0" },
-      dracula: { keyword: "#ff79c6", string: "#f1fa8c", number: "#bd93f9", comment: "#6272a4", property: "#bd93f9", function: "#50fa7b" },
-    };
-    for (const [syntaxTheme, want] of Object.entries(expected)) {
-      // Theme files disagree about hex case, so compare without it.
-      const answer = await handler({ code: CODE, language: "typescript", dark: true, syntaxTheme });
-      expect(lowerCaseRoles(answer.roles), syntaxTheme).toEqual(want);
-    }
-    // The light scheme resolves through the same table, and an id with no light
-    // flavour really does come back with GitHub Light's colours.
-    expect(lowerCaseRoles((await handler({ code: CODE, language: "typescript", dark: false, syntaxTheme: "catppuccin" })).roles))
-      .toMatchObject({ keyword: "#8839ef", function: "#1e66f5" });
-    expect(lowerCaseRoles((await handler({ code: CODE, language: "typescript", dark: false, syntaxTheme: "nord" })).roles))
-      .toEqual(lowerCaseRoles((await handler({ code: CODE, language: "typescript", dark: false, syntaxTheme: "github" })).roles));
-    // A palette belongs to one theme: the same request under another id differs.
-    const one = await handler({ code: CODE, language: "typescript", dark: true, syntaxTheme: "one" });
-    const nord = await handler({ code: CODE, language: "typescript", dark: true, syntaxTheme: "nord" });
-    expect(nord.roles).not.toEqual(one.roles);
-  }, 60_000);
+    const [core, regex] = await Promise.all([
+      import("@shikijs/core"),
+      import("@shikijs/engine-javascript"),
+    ]);
+    const highlighter = await core.createHighlighterCore({
+      themes: [],
+      langs: [await import("@shikijs/langs/typescript")],
+      engine: regex.createJavaScriptRegexEngine({ forgiving: true }),
+    });
 
-  it("names no palette for a theme it cannot match", async () => {
-    const handler = await highlightHandler();
-    // Highlighting still follows GitHub, but the client is not told those are the
-    // colours of the id it asked for, so it keeps its own fallback instead.
-    const answer = await handler({ code: CODE, language: "typescript", dark: true, syntaxTheme: "from-a-newer-host" });
-    expect(answer.theme).toBe("github-dark-default");
-    expect(answer.roles).toBeUndefined();
-  }, 30_000);
+    // One fixed sample, one marker word per role, so no two roles share a run.
+    const probe = (theme: string) => {
+      const tokens = highlighter
+        .codeToTokens('// BANANA\nconst APPLE = 7;\nfig.KIWI = MANGO("PEACH");', { lang: "typescript", theme })
+        .tokens
+        .flat();
+      const at = (marker: string) => {
+        const color = tokens.find((token) => token.content.includes(marker))?.color;
+        return typeof color === "string" ? color.toLowerCase() : "";
+      };
+      return {
+        keyword: at("const"),
+        string: at("PEACH"),
+        number: at("7"),
+        comment: at("BANANA"),
+        property: at("KIWI"),
+        function: at("MANGO"),
+      };
+    };
+
+    // The theme names come from the daemon itself, so a mapping change here fails
+    // against whatever it really painted with rather than a copied list.
+    for (const syntaxTheme of PASEO_SYNTAX_THEMES) {
+      for (const dark of [true, false]) {
+        const theme = (await handler({ code: CODE, language: "typescript", dark, syntaxTheme })).theme;
+        if (!highlighter.getLoadedThemes().includes(theme)) {
+          await highlighter.loadTheme(await import(`@shikijs/themes/${theme}`));
+        }
+        expect(probe(theme), `${syntaxTheme} ${dark ? "dark" : "light"}`)
+          .toEqual(normalise(clientPalette(syntaxTheme, dark)));
+      }
+    }
+  }, 120_000);
 
   it("tokenises the same text differently per theme", async () => {
     const handler = await highlightHandler();

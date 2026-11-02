@@ -4,11 +4,10 @@ import {
   highlightRpc,
   type HighlightLine,
   type HighlightToken,
-  type SyntaxRoles,
 } from "../shared/highlight-rpc";
 import { perfCount, probeHighlightRpc } from "./debug/perf";
 
-export type { HighlightLine, HighlightToken, SyntaxRoles };
+export type { HighlightLine, HighlightToken };
 
 export interface HighlightRequest {
   code: string;
@@ -175,60 +174,6 @@ type HighlightCall = (input: {
 }) => Promise<unknown>;
 
 /**
- * The palette the daemon highlighted with, per syntax theme and scheme.
- *
- * The client's own tokeniser needs six role colours to draw a block before any
- * answer arrives, and it has no theme data of its own — Shiki lives on the
- * daemon. So each answer carries those six, and they outlive the block that
- * fetched them: one round trip per theme switch, none per block after that.
- * Nothing asks for the palette by itself: every normal answer carries it. The
- * client also knows these colours ahead of time (`THEME_SYNTAX_ROLES`), so what
- * arrives here only confirms or corrects them.
- */
-const ROLE_KEYS = ["keyword", "string", "number", "comment", "property", "function"] as const;
-const roleCache = new Map<string, SyntaxRoles>();
-const roleListeners = new Set<() => void>();
-
-function roleKey(syntaxTheme: string, dark: boolean): string {
-  return `${syntaxTheme}\u0000${dark ? "dark" : "light"}`;
-}
-
-/** The daemon's answer, trusted only as far as six `#rrggbb` strings. */
-function readRoles(answer: unknown): SyntaxRoles | null {
-  if (typeof answer !== "object" || answer === null) return null;
-  const raw: unknown = "roles" in answer ? answer.roles : undefined;
-  if (typeof raw !== "object" || raw === null) return null;
-  const record = raw as Record<string, unknown>;
-  const roles = {} as SyntaxRoles;
-  for (const role of ROLE_KEYS) {
-    const color = record[role];
-    if (typeof color !== "string" || !/^#[0-9a-f]{6}([0-9a-f]{2})?$/i.test(color)) return null;
-    roles[role] = color;
-  }
-  return roles;
-}
-
-function rememberRoles(key: string, answer: unknown): void {
-  const roles = readRoles(answer);
-  if (roles === null || roleCache.get(key) !== undefined) return;
-  // The stored object is what subscribers compare by identity, so a palette
-  // seen twice does not restyle the timeline.
-  roleCache.set(key, roles);
-  for (const listener of roleListeners) listener();
-}
-
-export function readSyntaxRoles(syntaxTheme: string, dark: boolean): SyntaxRoles | null {
-  return roleCache.get(roleKey(syntaxTheme, dark)) ?? null;
-}
-
-export function subscribeSyntaxRoles(listener: () => void): () => void {
-  roleListeners.add(listener);
-  return () => {
-    roleListeners.delete(listener);
-  };
-}
-
-/**
  * One call per key. A second mount of the same block joins the promise already
  * in flight instead of asking the daemon to tokenise the same text again.
  */
@@ -247,9 +192,6 @@ function fetchLines(key: string, call: HighlightCall, request: HighlightRequest)
   })
     .then((answer) => {
       remember(key, readResponse(answer, isPlainHint(request.language)));
-      if (request.syntaxTheme !== undefined) {
-        rememberRoles(roleKey(request.syntaxTheme, request.dark), answer);
-      }
     })
     .catch(() => {
       remember(key, null);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type { PluginTheme } from "@getpaseo/plugin";
 import {
   DEFAULT_PREFERENCES,
@@ -26,7 +26,6 @@ import {
   type HostAppearance,
   type PaseoSyntaxThemeId,
 } from "../ui/tokens/host-appearance-shim";
-import { readSyntaxRoles, subscribeSyntaxRoles, type SyntaxRoles } from "../highlight";
 
 export type PluginSurfaceColors = PluginTheme["colors"];
 
@@ -309,56 +308,48 @@ export interface ThemeTokenOptions {
   theme?: unknown;
   /** Paseo's Appearance settings from the read-only shim (plan D10 level 2). */
   appearance?: HostAppearance | null;
-  /** Paseo's Appearance > Syntax theme id. */
+  /** Paseo's Appearance > Syntax theme id; picks the palette for code. */
   syntaxTheme?: PaseoSyntaxThemeId;
-  /**
-   * The daemon's own role colours for that theme, once it has answered. Until
-   * then the built-in pair below colours the local tokeniser.
-   */
-  syntaxRoles?: SyntaxRoles | null;
 }
 
-/**
- * GitHub Dark Dimmed / GitHub Light, as far as the six roles go: the last resort
- * for an id this table does not know.
- */
-const FALLBACK_SYNTAX_ROLES = {
-  dark: {
-    keyword: "#f47067",
-    string: "#96d0ff",
-    number: "#6cb6ff",
-    comment: "#768390",
-    property: "#6cb6ff",
-    function: "#dcbdfb",
-  },
-  light: {
-    keyword: "#cf222e",
-    string: "#0a3069",
-    number: "#0550ae",
-    comment: "#6e7781",
-    property: "#0550ae",
-    function: "#8250df",
-  },
-} as const satisfies Record<"dark" | "light", SyntaxRoles>;
+/** The six roles the client's own tokeniser paints a streaming fence with. */
+interface SyntaxRoles {
+  keyword: string;
+  string: string;
+  number: string;
+  comment: string;
+  property: string;
+  function: string;
+}
+
+/** GitHub Light Default: the light row for every family Shiki gives no light flavour. */
+const GITHUB_LIGHT: SyntaxRoles = {
+  keyword: "#cf222e",
+  string: "#0a3069",
+  number: "#0550ae",
+  comment: "#6e7781",
+  property: "#0550ae",
+  function: "#8250df",
+};
 
 /**
- * The six roles per Paseo syntax theme, copied from what the daemon probes.
+ * The six roles per Paseo syntax theme and scheme, for a fence still being typed.
  *
- * Without this, colouring a block before its answer arrived meant waiting for
- * some other block to finish first, and the wait showed as a flash of GitHub
- * colours on the fences of a fresh session. A theme switch needs no round trip
- * this way, and the daemon's report still wins if it disagrees, so a newer Shiki
- * can quietly correct a value here.
+ * An open fence never asks the daemon, so these colours have to be in this build.
+ * Each row is Shiki's own resolution of one fixed sample line, and
+ * `test/unit/syntax-theme-server.test.ts` re-reads every row from the real theme
+ * files, so a Shiki bump that moves a colour fails there rather than restyling
+ * open fences mid-session. The table covers all eight ids: an id Paseo adds later
+ * is rejected by `parseSyntaxTheme` before it gets here, and adding one to
+ * `PASEO_SYNTAX_THEMES` without a row is a type error.
  *
- * The light column follows the daemon's mapping: Shiki ships no light flavour for
- * Tokyo Night, Nord or Dracula, so those reuse GitHub Light. `test/unit/
- * syntax-theme-server.test.ts` pins these same values as its goldens, which is
- * where to look if a colour ever disagrees with what the daemon answers.
+ * The light column matches the daemon's mapping: Shiki 4.4.3 ships no light
+ * flavour for Tokyo Night, Nord or Dracula, so those reuse GitHub Light.
  */
-const THEME_SYNTAX_ROLES: Partial<Record<PaseoSyntaxThemeId, Record<"dark" | "light", SyntaxRoles>>> = {
+const THEME_SYNTAX_ROLES: Record<PaseoSyntaxThemeId, Record<"dark" | "light", SyntaxRoles>> = {
   github: {
     dark: { keyword: "#ff7b72", string: "#a5d6ff", number: "#79c0ff", comment: "#8b949e", property: "#79c0ff", function: "#d2a8ff" },
-    light: FALLBACK_SYNTAX_ROLES.light,
+    light: GITHUB_LIGHT,
   },
   one: {
     dark: { keyword: "#c678dd", string: "#98c379", number: "#d19a66", comment: "#7f848e", property: "#e06c75", function: "#61afef" },
@@ -378,15 +369,15 @@ const THEME_SYNTAX_ROLES: Partial<Record<PaseoSyntaxThemeId, Record<"dark" | "li
   },
   "tokyo-night": {
     dark: { keyword: "#9d7cd8", string: "#9ece6a", number: "#ff9e64", comment: "#51597d", property: "#ff9e64", function: "#7aa2f7" },
-    light: FALLBACK_SYNTAX_ROLES.light,
+    light: GITHUB_LIGHT,
   },
   nord: {
     dark: { keyword: "#81a1c1", string: "#a3be8c", number: "#b48ead", comment: "#616e88", property: "#d8dee9", function: "#88c0d0" },
-    light: FALLBACK_SYNTAX_ROLES.light,
+    light: GITHUB_LIGHT,
   },
   dracula: {
     dark: { keyword: "#ff79c6", string: "#f1fa8c", number: "#bd93f9", comment: "#6272a4", property: "#bd93f9", function: "#50fa7b" },
-    light: FALLBACK_SYNTAX_ROLES.light,
+    light: GITHUB_LIGHT,
   },
 };
 
@@ -398,14 +389,10 @@ export function buildThemeTokens(
   const platform = options.platform ?? STATIC_PLATFORM;
   const typography = resolveTypography(options.theme, preferences, platform, options.appearance ?? null);
   const isDark = isDarkSurface(colors.surface0);
-  const scheme = isDark ? "dark" : "light";
   const syntaxTheme = options.syntaxTheme ?? DEFAULT_SYNTAX_THEME;
-  // In order of trust: what the caller was told by the daemon, what any earlier
-  // block was told, this theme's own probed palette, and only then GitHub.
-  const roles = options.syntaxRoles
-    ?? readSyntaxRoles(syntaxTheme, isDark)
-    ?? THEME_SYNTAX_ROLES[syntaxTheme]?.[scheme]
-    ?? FALLBACK_SYNTAX_ROLES[scheme];
+  // A fence still being typed has no daemon answer to read, so its six colours
+  // come from this table.
+  const roles = THEME_SYNTAX_ROLES[syntaxTheme][isDark ? "dark" : "light"];
   const fg = colors.foreground;
   const accent = ACCENT_PRESETS[preferences.accent] ?? colors.accent;
   // Status colours are the host's roles; the constants only cover a host
@@ -506,9 +493,9 @@ export function buildThemeTokens(
       elevation: { overlay: overlayShadow },
     },
 
-    // Code colours follow the reader's Paseo syntax theme: the six roles come
-    // from the theme the daemon highlighted with. Diff tints stay the host's
-    // status colours, which are not part of a syntax theme.
+    // Code colours follow the reader's Paseo syntax theme: these six roles colour
+    // a streaming fence, while a finished block carries Shiki's own colours. Diff
+    // tints stay the host's status colours, which are not part of a syntax theme.
     syntax: {
       keyword: roles.keyword,
       string: roles.string,
@@ -543,15 +530,9 @@ export function useThemeTokens(
   // The value keeps its identity until it changes. H1 takes precedence and
   // the hook stops reading.
   const appearance = useHostAppearance(readHostTypography(theme) === null, theme);
-  // Paseo's syntax theme and, once the daemon has named it, that theme's own
-  // role colours. Both are shared stores: one look per 500 ms, one RPC per
-  // theme switch, and their identity only changes when the value does.
+  // Paseo's syntax theme: one shared store, one look per 500 ms at most, and its
+  // identity changes only when the value does.
   const syntaxTheme = useHostSyntaxTheme(theme);
-  const syntaxRoles = useSyncExternalStore(
-    subscribeSyntaxRoles,
-    () => readSyntaxRoles(syntaxTheme, isDarkSurface(theme.colors.surface0)),
-    () => null,
-  );
   // The drawer's pinch zoom is no part of the tokens: saving it must not
   // restyle every row of the timeline.
   const drawn = useRef(preferences);
@@ -566,11 +547,10 @@ export function useThemeTokens(
         theme,
         appearance,
         syntaxTheme,
-        syntaxRoles,
       });
     },
     // `theme` is read through `key`; its identity is exactly what must not count.
-    [key, tokenPreferences, platform, appearance, syntaxTheme, syntaxRoles],
+    [key, tokenPreferences, platform, appearance, syntaxTheme],
   );
 }
 

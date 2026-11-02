@@ -7,7 +7,6 @@ type HighlightAnswer = {
   lines: unknown[];
   language: string | null;
   theme: string;
-  roles?: SyntaxRoles;
 };
 
 const rpc = vi.hoisted(() => ({
@@ -23,9 +22,7 @@ vi.mock("@getpaseo/plugin/client/react-native", async () => ({
 }));
 
 import { buildThemeTokens } from "../../client/components/theme-tokens";
-import { readSyntaxRoles } from "../../client/highlight";
 import { SyntaxHighlightBlock } from "../../client/components/syntax-highlight";
-import type { SyntaxRoles } from "../../shared/highlight-rpc";
 
 
 const SURFACE = {
@@ -41,18 +38,6 @@ const SURFACE = {
   statusWarning: "#d9a53f",
   statusDanger: "#e5484d",
 };
-
-const NORD: SyntaxRoles = {
-  keyword: "#81a1c1",
-  string: "#a3be8c",
-  number: "#b48ead",
-  comment: "#616e88",
-  property: "#88c0d0",
-  function: "#88c0d0",
-};
-
-/** A palette as the daemon reports one, with two colours no table contains. */
-const REPORTED: SyntaxRoles = { ...NORD, keyword: "#123456", property: "#654321" };
 
 /** Every colour the block painted, whatever role carried it. */
 function paintedColours(renderer: ReactTestRenderer): string[] {
@@ -96,35 +81,9 @@ describe("a streaming fence follows the reader's syntax theme", () => {
     const colours = paintedColours(tokyo);
     expect(colours).toContain("#9d7cd8");
     expect(colours).not.toContain("#c678dd");
+    // An open fence has no answer to wait for, so its colours come from this
+    // build alone; asking the daemon would be a round trip per theme switch.
+    expect(rpc.call).not.toHaveBeenCalled();
     act(() => tokyo.unmount());
-  });
-
-  it("prefers what the daemon reported over the palette copied into the client", async () => {
-    const copy = await draw({ syntaxTheme: "gruvbox" });
-    expect(paintedColours(copy)).toContain("#fe8019");
-    act(() => copy.unmount());
-
-    const reported = await draw({ syntaxTheme: "gruvbox", syntaxRoles: REPORTED });
-    const colours = paintedColours(reported);
-    expect(colours).toContain("#123456");
-    expect(colours).not.toContain("#fe8019");
-    act(() => reported.unmount());
-  });
-
-  it("learns the palette from a finished block and keeps it", async () => {
-    rpc.call.mockImplementation(async () => ({
-      lines: [], language: null, theme: "gruvbox" as const, roles: REPORTED,
-    }));
-
-    // Nothing has been answered this session, so the store is still empty.
-    expect(readSyntaxRoles("gruvbox", true)).toBeNull();
-
-    // A closed fence asks for tokens, and its answer carries the six colours.
-    const finished = await draw({ syntaxTheme: "gruvbox" }, true);
-    act(() => finished.unmount());
-
-    expect(readSyntaxRoles("gruvbox", true)).toMatchObject({ keyword: "#123456" });
-    // One ask for tokens, and no extra round trip hunting for the palette alone.
-    expect(rpc.call.mock.calls.every(([request]) => (request as { code?: string }).code !== "")).toBe(true);
   });
 });
